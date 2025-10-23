@@ -1,14 +1,28 @@
-# ComfyUI/custom_nodes/minicpmv4_llamacpp/__init__.py
-from .loader import NODE_CLASS_MAPPINGS as LOADER_MAP, NODE_DISPLAY_NAME_MAPPINGS as LOADER_NAME
-from .prompt_utils import NODE_CLASS_MAPPINGS as PROMPT_MAP, NODE_DISPLAY_NAME_MAPPINGS as PROMPT_NAME
-from .vision_infer import NODE_CLASS_MAPPINGS as INFER_MAP, NODE_DISPLAY_NAME_MAPPINGS as INFER_NAME
+# ComfyUI/custom_nodes/ComfyUI_minicpmv4/__init__.py
+from .loader import NODE_CLASS_MAPPINGS as LOADER_MAPPINGS
+from .loader import NODE_DISPLAY_NAME_MAPPINGS as LOADER_DISPLAY
+from .loader import LLAMA_CPP_AVAILABLE, LLAMA_CPP_ERROR
 
-NODE_CLASS_MAPPINGS = {}
-NODE_CLASS_MAPPINGS.update(LOADER_MAP)
-NODE_CLASS_MAPPINGS.update(PROMPT_MAP)
-NODE_CLASS_MAPPINGS.update(INFER_MAP)
+from .vision_infer import NODE_CLASS_MAPPINGS as INFER_MAPPINGS
+from .vision_infer import NODE_DISPLAY_NAME_MAPPINGS as INFER_DISPLAY
 
-NODE_DISPLAY_NAME_MAPPINGS = {}
-NODE_DISPLAY_NAME_MAPPINGS.update(LOADER_NAME)
-NODE_DISPLAY_NAME_MAPPINGS.update(PROMPT_NAME)
-NODE_DISPLAY_NAME_MAPPINGS.update(INFER_NAME)
+NODE_CLASS_MAPPINGS = {
+    **LOADER_MAPPINGS,
+    **INFER_MAPPINGS,
+}
+
+NODE_DISPLAY_NAME_MAPPINGS = {
+    **LOADER_DISPLAY,
+    **INFER_DISPLAY,
+}
+
+print("\n" + "="*60)
+print("MiniCPM-V-4 GGUF Node Loaded")
+if LLAMA_CPP_AVAILABLE:
+    print("✓ llama-cpp-python available")
+else:
+    print(f"✗ llama-cpp-python NOT available: {LLAMA_CPP_ERROR}")
+    print("  Install: pip install llama-cpp-python")
+print("="*60 + "\n")
+
+__all__ = ['NODE_CLASS_MAPPINGS', 'NODE_DISPLAY_NAME_MAPPINGS']
