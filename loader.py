@@ -101,13 +101,15 @@ class MiniCPMV4GGUFLoader:
             print(f"[MiniCPM-V-4] Using cached model")
             return (_MODEL_CACHE[cache_key],)
         
-        n_ctx = 4096
-        n_batch = 2048
+        # ✅ Optimized settings for vision model
+        n_ctx = 8192
+        n_batch = 512
         n_threads = max(4, os.cpu_count() // 2) if os.cpu_count() else 4
         n_gpu_layers = -1 if processing_mode == "GPU" else 0
         
         print(f"[MiniCPM-V-4] Loading {model} on {processing_mode}")
         print(f"[MiniCPM-V-4] GPU layers: {n_gpu_layers}")
+        print(f"[MiniCPM-V-4] Context size: {n_ctx}")
         
         old_stdout = sys.stdout
         old_stderr = sys.stderr
@@ -116,19 +118,25 @@ class MiniCPMV4GGUFLoader:
             sys.stdout = io.StringIO()
             sys.stderr = io.StringIO()
             
+            # ✅ Create chat handler FIRST
+            chat_handler = Llava15ChatHandler(
+                clip_model_path=str(mmproj_path),
+                verbose=False
+            )
+            
+            # ✅ Then create Llama with the handler
             llm = Llama(
                 model_path=str(model_path),
                 n_ctx=n_ctx,
                 n_batch=n_batch,
                 n_threads=n_threads,
                 n_gpu_layers=n_gpu_layers,
-                verbose=True,
-                chat_handler=Llava15ChatHandler(clip_model_path=str(mmproj_path)),
+                chat_handler=chat_handler,  # Pass the handler
+                logits_all=True,
+                verbose=False,
                 offload_kqv=True,
-                numa=False,
-                use_mlock=False,
                 use_mmap=True,
-                n_parts=1,
+                use_mlock=False,
             )
             
         finally:
@@ -137,13 +145,16 @@ class MiniCPMV4GGUFLoader:
         
         handle = {
             "llm": llm,
+            "chat_handler": chat_handler,
             "n_gpu_layers": n_gpu_layers,
-            "processing_mode": processing_mode
+            "processing_mode": processing_mode,
+            "mmproj_path": mmproj_path,
         }
         
         _MODEL_CACHE[cache_key] = handle
         
         print(f"[MiniCPM-V-4] ✓ Loaded successfully on {processing_mode}")
+        print(f"[MiniCPM-V-4] ✓ Vision projector loaded from {mmproj_path}")
         
         return (handle,)
 

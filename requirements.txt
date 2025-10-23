@@ -1,3 +1,10 @@
+# Tell pip to find pre-compiled CUDA 12.1 wheels for llama-cpp-python
+--extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu121
+
+# Tell pip to *only* install pre-compiled wheels (no source compilation)
+--only-binary :all:
+
+# Your project dependencies
 llama-cpp-python>=0.2.0
 huggingface-hub
 numpy

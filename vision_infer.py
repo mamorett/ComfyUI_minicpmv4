@@ -4,6 +4,8 @@ import io
 import numpy as np
 from PIL import Image
 import re
+import time
+import hashlib
 
 def _to_numpy(arr) -> np.ndarray:
     try:
@@ -18,9 +20,8 @@ def _pil_from_comfy(batch) -> Image.Image:
     """Convert ComfyUI image batch to PIL Image (first image only)"""
     x = _to_numpy(batch)
     if x.ndim == 4:
-        x = x[0]  # Take first image
+        x = x[0]
     
-    # Clip and convert to uint8
     x = np.clip(x, 0.0, 1.0)
     x = (x * 255.0 + 0.5).astype(np.uint8)
     
@@ -31,10 +32,6 @@ def _image_to_data_uri(image: Image.Image) -> str:
     if image.mode != 'RGB':
         image = image.convert('RGB')
     
-    # Resize to 336x336 (standard for vision models)
-    image = image.resize((336, 336), Image.Resampling.BILINEAR)
-    
-    # Convert to base64
     buffer = io.BytesIO()
     image.save(buffer, format='PNG')
     buffer.seek(0)
@@ -42,21 +39,29 @@ def _image_to_data_uri(image: Image.Image) -> str:
     
     return f"data:image/png;base64,{img_base64}"
 
+def _get_image_hash(image: Image.Image) -> str:
+    """Get hash of image for cache busting"""
+    buffer = io.BytesIO()
+    image.save(buffer, format='PNG')
+    return hashlib.md5(buffer.getvalue()).hexdigest()[:8]
+
 def _clean_output(text: str) -> str:
     """Clean up model output"""
     if not text:
         return text
     
-    # Remove common prefixes
     patterns = [
         r'^[\s\-•*]+',
         r'^(?!1\.)\d+[\.\)\s\-]+',
         r'^(Assistant|User|MiniCPM|AI):\s*',
-        r'^[A-Z][a-z]+:\s*'
+        r'^[A-Z][a-z]+:\s*',
+        r'<\|im_start\|>.*?<\|im_end\|>',
+        r'<image>',
+        r'\[INST\].*?\[/INST\]',
     ]
     
     for pattern in patterns:
-        text = re.sub(pattern, '', text, flags=re.IGNORECASE)
+        text = re.sub(pattern, '', text, flags=re.IGNORECASE | re.DOTALL)
     
     text = text.strip()
     return text
@@ -71,13 +76,12 @@ class MiniCPMV4VisionInfer:
                 "prompt": ("STRING", {"multiline": True, "default": "Describe this image in detail."}),
             },
             "optional": {
-                "system_prompt": ("STRING", {"multiline": True, "default": "You are a helpful AI assistant."}),
-                "max_tokens": ("INT", {"default": 1024, "min": 64, "max": 4096}),
+                "max_tokens": ("INT", {"default": 512, "min": 64, "max": 2048}),
                 "temperature": ("FLOAT", {"default": 0.7, "min": 0.0, "max": 2.0, "step": 0.05}),
-                "top_p": ("FLOAT", {"default": 0.8, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "top_p": ("FLOAT", {"default": 0.9, "min": 0.0, "max": 1.0, "step": 0.01}),
                 "top_k": ("INT", {"default": 40, "min": 0, "max": 200}),
-                "repeat_penalty": ("FLOAT", {"default": 1.05, "min": 0.0, "max": 2.0, "step": 0.01}),
-                "seed": ("INT", {"default": -1, "min": -1, "max": 0xffffffffffffffff}),
+                "repeat_penalty": ("FLOAT", {"default": 1.1, "min": 0.0, "max": 2.0, "step": 0.01}),
+                "force_new_context": ("BOOLEAN", {"default": True}),
             }
         }
 
@@ -87,45 +91,94 @@ class MiniCPMV4VisionInfer:
     CATEGORY = "LLM/Multimodal"
 
     def run(self, handle, image, prompt,
-            system_prompt="You are a helpful AI assistant.",
-            max_tokens=1024, temperature=0.7, top_p=0.8, top_k=40,
-            repeat_penalty=1.05, seed=-1):
+            max_tokens=512, temperature=0.7, top_p=0.9, top_k=40,
+            repeat_penalty=1.1, force_new_context=True):
 
         if handle is None or not isinstance(handle, dict) or "llm" not in handle:
             raise RuntimeError("[MiniCPM-V-4] Invalid handle - model not loaded")
 
         llm = handle["llm"]
         
+        # ✅ AGGRESSIVE CACHE CLEARING
         print(f"\n{'='*60}")
-        print(f"[MiniCPM-V-4] Starting inference")
+        print(f"[MiniCPM-V-4] Starting NEW vision inference")
+        
+        if force_new_context:
+            print("[MiniCPM-V-4] Force clearing all caches...")
+            
+            # Method 1: Reset the model
+            try:
+                llm.reset()
+                print("  ✓ Model reset")
+            except Exception as e:
+                print(f"  ✗ Model reset failed: {e}")
+            
+            # Method 2: Clear KV cache directly
+            try:
+                if hasattr(llm, '_ctx'):
+                    llm._ctx.kv_cache_clear()
+                    print("  ✓ KV cache cleared")
+            except Exception as e:
+                print(f"  ✗ KV cache clear failed: {e}")
+            
+            # Method 3: Clear eval cache
+            try:
+                if hasattr(llm, 'eval_tokens'):
+                    llm.eval_tokens.clear()
+                    print("  ✓ Eval tokens cleared")
+            except Exception as e:
+                print(f"  ✗ Eval tokens clear failed: {e}")
+            
+            # Method 4: Reset chat handler state
+            try:
+                chat_handler = handle.get('chat_handler')
+                if chat_handler and hasattr(chat_handler, 'reset'):
+                    chat_handler.reset()
+                    print("  ✓ Chat handler reset")
+            except Exception as e:
+                print(f"  ✗ Chat handler reset failed: {e}")
+        
         print(f"  Prompt: {prompt[:80]}...")
         print(f"  Max tokens: {max_tokens}")
         print(f"  Temperature: {temperature}")
-        print(f"  GPU layers: {handle.get('n_gpu_layers', 'unknown')}")
+        print(f"  Processing mode: {handle.get('processing_mode', 'unknown')}")
         print(f"{'='*60}")
         
-        # Convert ComfyUI image to PIL
+        # Convert image
         print("[MiniCPM-V-4] Converting image...")
         pil_image = _pil_from_comfy(image)
-        print(f"[MiniCPM-V-4] Image size: {pil_image.size}, mode: {pil_image.mode}")
+        image_hash = _get_image_hash(pil_image)
+        print(f"[MiniCPM-V-4] Image size: {pil_image.size}, mode: {pil_image.mode}, hash: {image_hash}")
         
-        # Convert image to base64 data URI
+        # Encode to data URI
         print("[MiniCPM-V-4] Encoding image to base64...")
         data_uri = _image_to_data_uri(pil_image)
         print(f"[MiniCPM-V-4] Base64 length: {len(data_uri)} chars")
         
-        # Build messages in chat format (simplified - no system message in user content)
+        # ✅ Add unique identifier to prevent cache hits
+        timestamp = int(time.time() * 1000)
+        unique_prompt = f"{prompt.strip()}\n\n[Image ID: {image_hash}-{timestamp}]"
+        
+        # ✅ Message format with cache-busting
         messages = [
             {
                 "role": "user",
                 "content": [
-                    {"type": "image_url", "image_url": {"url": data_uri}},
-                    {"type": "text", "text": prompt.strip()}
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": data_uri
+                        }
+                    },
+                    {
+                        "type": "text",
+                        "text": unique_prompt
+                    }
                 ]
             }
         ]
         
-        # Prepare generation parameters (simplified)
+        # ✅ Generation parameters with unique seed
         gen_params = {
             "messages": messages,
             "max_tokens": max_tokens,
@@ -134,111 +187,113 @@ class MiniCPMV4VisionInfer:
             "top_k": top_k,
             "repeat_penalty": repeat_penalty,
             "stream": False,
+            "seed": timestamp % (2**31),  # Unique seed per request
         }
         
-        if isinstance(seed, int) and seed >= 0:
-            gen_params["seed"] = seed
-        
         print("[MiniCPM-V-4] Generating response...")
-        print(f"  Parameters: temp={temperature}, top_p={top_p}, top_k={top_k}")
+        print(f"  Parameters: temp={temperature}, top_p={top_p}, top_k={top_k}, seed={gen_params['seed']}")
         
         try:
-            # Generate response
             response = llm.create_chat_completion(**gen_params)
             
-            print(f"[MiniCPM-V-4] Raw response received")
-            print(f"  Response keys: {response.keys()}")
+            print(f"[MiniCPM-V-4] Response received")
             
-            # Extract content - try multiple paths
+            # Extract content
             content = ""
-            
-            # Path 1: Standard chat completion format
             try:
                 if "choices" in response and len(response["choices"]) > 0:
                     choice = response["choices"][0]
-                    print(f"  Choice keys: {choice.keys()}")
+                    finish_reason = choice.get('finish_reason')
+                    print(f"[MiniCPM-V-4] Finish reason: {finish_reason}")
                     
                     if "message" in choice:
                         message = choice["message"]
-                        print(f"  Message keys: {message.keys()}")
                         content = message.get("content", "")
                     elif "text" in choice:
-                        content = choice["text"]
-                    
-                    print(f"  Extracted content length: {len(content)}")
+                        content = choice.get("text", "")
+                        
+                    # Log token usage
+                    if "usage" in response:
+                        usage = response["usage"]
+                        prompt_tokens = usage.get('prompt_tokens', 0)
+                        completion_tokens = usage.get('completion_tokens', 0)
+                        print(f"[MiniCPM-V-4] Tokens - Prompt: {prompt_tokens}, Completion: {completion_tokens}")
+                        
+                        # ✅ Warn if completion is suspiciously short
+                        if completion_tokens < 10:
+                            print(f"[MiniCPM-V-4] ⚠️  WARNING: Very few completion tokens ({completion_tokens})")
+                        
             except Exception as e:
-                print(f"  Error extracting content: {e}")
+                print(f"[MiniCPM-V-4] Error extracting content: {e}")
             
             # If still empty, try alternative extraction
             if not content:
-                print("[MiniCPM-V-4] Content empty, trying alternative extraction...")
-                try:
-                    # Sometimes the response is directly in the dict
-                    if "content" in response:
-                        content = response["content"]
-                    elif "text" in response:
+                print("[MiniCPM-V-4] WARNING: Empty content, attempting alternative extraction...")
+                print(f"[MiniCPM-V-4] Response: {response}")
+                
+                if isinstance(response, str):
+                    content = response
+                elif isinstance(response, dict):
+                    if "text" in response:
                         content = response["text"]
-                except Exception as e:
-                    print(f"  Alternative extraction failed: {e}")
+                    elif "content" in response:
+                        content = response["content"]
             
-            # If STILL empty, print full response for debugging
-            if not content:
-                print("[MiniCPM-V-4] WARNING: Empty content!")
-                print(f"  Full response: {response}")
-                
-                # Try one more time with different parameters
-                print("[MiniCPM-V-4] Retrying with adjusted parameters...")
-                retry_params = {
-                    "messages": messages,
-                    "max_tokens": max_tokens,
-                    "temperature": 0.8,
-                    "top_p": 0.9,
-                    "stream": False,
-                }
-                
-                retry_response = llm.create_chat_completion(**retry_params)
-                print(f"  Retry response: {retry_response}")
-                
-                try:
-                    content = retry_response["choices"][0]["message"]["content"]
-                except Exception:
-                    try:
-                        content = retry_response["choices"][0]["text"]
-                    except Exception:
-                        pass
-            
-            # Clean output
+            # Clean the output
             if content:
+                original_length = len(content)
+                # Remove the cache-busting suffix before cleaning
+                content = re.sub(r'\[Image ID:.*?\]', '', content, flags=re.IGNORECASE)
                 content = _clean_output(content)
+                print(f"[MiniCPM-V-4] Cleaned output: {original_length} -> {len(content)} chars")
             
-            if not content:
+            # Final check
+            if not content or len(content.strip()) < 10:
                 error_msg = (
-                    "[MiniCPM-V-4] ERROR: Model returned empty response.\n\n"
-                    "Possible causes:\n"
-                    "1. Model not compatible with llama-cpp-python version\n"
-                    "2. Vision projector not loading correctly\n"
-                    "3. Image format issue\n\n"
-                    "Try:\n"
-                    "- Rebuild llama-cpp-python with CUDA support\n"
-                    "- Use different quantization (Q4_K_M or Q5_K_M)\n"
-                    "- Check if model files are corrupted\n"
+                    f"[MiniCPM-V-4] ERROR: Model returned insufficient content.\n\n"
+                    f"Content received: '{content}'\n"
+                    f"Content length: {len(content) if content else 0}\n\n"
+                    f"This suggests the model/mmproj combination is not working correctly.\n\n"
+                    f"Troubleshooting steps:\n"
+                    f"1. Verify MMPROJ file matches the model architecture\n"
+                    f"2. Try Q8_0 quantization for testing\n"
+                    f"3. Check llama-cpp-python version: pip show llama-cpp-python\n"
+                    f"4. Ensure llama.cpp was built with LLAVA support\n"
+                    f"5. Try a different image (simpler, smaller)\n"
+                    f"6. Increase max_tokens to 1024+\n\n"
+                    f"Debug info:\n"
+                    f"  MMPROJ: {handle.get('mmproj_path')}\n"
+                    f"  Processing: {handle.get('processing_mode')}\n"
+                    f"  GPU layers: {handle.get('n_gpu_layers')}\n"
+                    f"  Image: {pil_image.size}, hash: {image_hash}\n"
+                    f"  Prompt length: {len(prompt)}\n"
                 )
                 print(error_msg)
                 return (error_msg,)
             
             print(f"\n{'='*60}")
             print(f"[MiniCPM-V-4] ✓ Generated {len(content)} characters")
-            print(f"  Preview: {content[:100]}...")
+            print(f"  Preview: {content[:200]}...")
+            print(f"  Image hash: {image_hash}")
             print(f"{'='*60}\n")
             
             return (content,)
             
         except Exception as e:
             import traceback
-            error_msg = f"[MiniCPM-V-4] Generation error: {e}\n\n{traceback.format_exc()}"
+            error_msg = (
+                f"[MiniCPM-V-4] Generation error: {e}\n\n"
+                f"Traceback:\n{traceback.format_exc()}\n\n"
+                f"Debug info:\n"
+                f"  Model path: {getattr(llm, 'model_path', 'unknown')}\n"
+                f"  MMPROJ path: {handle.get('mmproj_path', 'unknown')}\n"
+                f"  Processing mode: {handle.get('processing_mode', 'unknown')}\n"
+                f"  GPU layers: {handle.get('n_gpu_layers', 'unknown')}\n"
+                f"  Has chat_handler: {handle.get('chat_handler') is not None}\n"
+                f"  Image hash: {image_hash}\n"
+            )
             print(error_msg)
             return (error_msg,)
 
 NODE_CLASS_MAPPINGS = {"MiniCPMV4VisionInfer": MiniCPMV4VisionInfer}
 NODE_DISPLAY_NAME_MAPPINGS = {"MiniCPMV4VisionInfer": "MiniCPM-V-4 (GGUF) Vision Infer"}
-
